@@ -113,7 +113,7 @@ var CONFIG = {
     // Fallback parent menu node id if none is passed via ?menuId= on the
     // embed URL. Replace with the real id for bshrfp once you have it, or
     // always pass ?menuId= on the embed URL and leave this empty.
-    DEFAULT_MENU_ID: "",
+    DEFAULT_MENU_ID: "6a6e18529ff85a0bcba6ee6f",
     DEFAULT_LOCALE: "en_US",
     TEASER_MAX_CHARS: 160,
 
@@ -125,27 +125,6 @@ var CONFIG = {
 function qp(name) { return new URLSearchParams(location.search).get(name); }
 var MENU_ID = qp("menuId") || CONFIG.DEFAULT_MENU_ID;
 var LOCALE = qp("locale") || CONFIG.DEFAULT_LOCALE;
-
-/* Resolve the Staffbase origin to build API URLs against. When this HTML
-   is served same-origin from the Staffbase domain, location.origin is
-   correct. But inside a srcdoc / sandboxed iframe the origin is opaque
-   ("null"), so we recover the host page origin from ancestorOrigins or the
-   referrer. An explicit ?apiBase= override always wins. */
-var BASE_ORIGIN = (function () {
-    var override = qp("apiBase") || qp("base");
-    if (override) return override.replace(/\/+$/, "");
-    var origin = location.origin;
-    if (origin && origin !== "null" && /^https?:/i.test(origin)) return origin;
-    try {
-        if (location.ancestorOrigins && location.ancestorOrigins.length) {
-            return location.ancestorOrigins[location.ancestorOrigins.length - 1];
-        }
-    } catch (e) { /* not supported, fall through */ }
-    if (document.referrer) {
-        try { return new URL(document.referrer).origin; } catch (e) { /* ignore */ }
-    }
-    return "";
-})();
 
 /* =====================================================================
    STAFFBASE BRAND COLOR PASSTHROUGH
@@ -198,8 +177,7 @@ var ICON_ARROW = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" str
    user's session cookie is sent automatically.
    ===================================================================== */
 function sbFetch(path, params) {
-    if (!BASE_ORIGIN) return Promise.reject(new Error("Could not resolve the Staffbase origin. Add ?apiBase=https://bshrfp.staffbase.rocks to the widget URL."));
-    var url = new URL(path, BASE_ORIGIN);
+    var url = new URL(path, location.origin);
     Object.keys(params || {}).forEach(function (k) {
         if (params[k] !== undefined && params[k] !== null) url.searchParams.set(k, params[k]);
     });
@@ -267,10 +245,10 @@ function getNodeTitle(node, locale) {
 // the *menu node id*.
 function buildPageUrl(node) {
     if (node.target && node.target.url) {
-        return BASE_ORIGIN + String(node.target.url).replace(/^\/openlink/, "");
+        return location.origin + String(node.target.url).replace(/^\/openlink/, "");
     }
-    if (node.pluginID) return BASE_ORIGIN + "/content/" + node.pluginID + "/" + node.id;
-    return BASE_ORIGIN + "/content/menu/" + node.id;
+    if (node.pluginID) return location.origin + "/content/" + node.pluginID + "/" + node.id;
+    return location.origin + "/content/menu/" + node.id;
 }
 
 /* ---------------------------------------------------------------------
