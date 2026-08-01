@@ -113,7 +113,7 @@ var CONFIG = {
     // Fallback parent menu node id if none is passed via ?menuId= on the
     // embed URL. Replace with the real id for bshrfp once you have it, or
     // always pass ?menuId= on the embed URL and leave this empty.
-    DEFAULT_MENU_ID: "6a6e18529ff85a0bcba6ee6f",
+    DEFAULT_MENU_ID: "6a6558052a3610619c580c70",
     DEFAULT_LOCALE: "en_US",
     TEASER_MAX_CHARS: 160,
 
@@ -125,6 +125,9 @@ var CONFIG = {
 function qp(name) { return new URLSearchParams(location.search).get(name); }
 var MENU_ID = qp("menuId") || CONFIG.DEFAULT_MENU_ID;
 var LOCALE = qp("locale") || CONFIG.DEFAULT_LOCALE;
+// ?debug=1 dumps the raw menu child nodes instead of rendering tiles —
+// use it to inspect the actual field names for this environment.
+var DEBUG = qp("debug") === "1" || qp("debug") === "true";
 
 /* Resolve the Staffbase origin to build API URLs against. When this HTML
    is served same-origin from the Staffbase domain, location.origin is
@@ -216,8 +219,17 @@ function sbFetch(path, params) {
    including its subtree; GET /api/menu returns the whole accessible tree.
    We read children from `node.children.data`.
    --------------------------------------------------------------------- */
+// Children may come back in a few shapes depending on the endpoint/version:
+// node.children.data (documented), node.children (bare array), node.items,
+// or node.data. Accept whichever is an array.
 function extractChildren(node) {
-    return (node && node.children && Array.isArray(node.children.data)) ? node.children.data : null;
+    if (!node) return null;
+    var c = node.children;
+    if (Array.isArray(c)) return c;
+    if (c && Array.isArray(c.data)) return c.data;
+    if (Array.isArray(node.items)) return node.items;
+    if (Array.isArray(node.data)) return node.data;
+    return null;
 }
 
 function getMenuChildren(menuId) {
@@ -247,18 +259,31 @@ function findChildrenInTree(menuId) {
     });
 }
 
-// A page tile is backed by an *installation reference* node with
-// pluginID "page". Folders (nodeType "folder") and other content types
-// are skipped. The Pages API id is the node's `installationID`.
-function isPageNode(node) {
-    return node && node.nodeType !== "folder" && node.pluginID === "page" && !!node.installationID;
+// The Pages API id lives on the node under one of these field names.
+function nodeInstallationId(node) {
+    return (node && (node.installationID || node.installationId || node.contentID || node.contentId)) || null;
+}
+// Is this menu child a page-like content node? Historically the pages
+// plugin id has been "page" or "pages" — accept either.
+function looksLikePage(node) {
+    return /^pages?$/i.test((node && node.pluginID) || "");
+}
+// A renderable child tile: any content/link node that isn't a plain folder.
+// We keep anything with a content installation, a prebuilt link target, or a
+// plugin id — folders (organizational only) are skipped.
+function isContentNode(node) {
+    if (!node || node.nodeType === "folder") return false;
+    return !!nodeInstallationId(node) || !!(node.target && node.target.url) || !!node.pluginID;
 }
 
-// Title from the menu node localization (always present, no extra fetch).
+// Title from the menu node localization (always present, no extra fetch),
+// with fallbacks for alternate shapes.
 function getNodeTitle(node, locale) {
-    var loc = node && node.config && node.config.localization;
-    var picked = pickLocale(loc, locale);
-    return (picked && picked.title) || null;
+    var picked = pickLocale(node && node.config && node.config.localization, locale);
+    if (picked && picked.title) return picked.title;
+    var picked2 = pickLocale(node && node.localization, locale);
+    if (picked2 && picked2.title) return picked2.title;
+    return (node && (node.title || node.name)) || null;
 }
 
 // In-app URL: Staffbase pre-builds `target.url` on the node with the
@@ -354,9 +379,18 @@ function fetchSubPages(menuId, locale) {
     if (cached) return Promise.resolve(cached);
 
     return getMenuChildren(menuId).then(function (children) {
-        var pageNodes = (children || []).filter(isPageNode);
-        return Promise.all(pageNodes.map(function (node) {
-            return getPage(node.installationID).then(function (page) {
+        var contentNodes = (children || []).filter(isContentNode);
+        return Promise.all(contentNodes.map(function (node) {
+            var nodeTile = {
+                title: getNodeTitle(node, locale) || "Untitled",
+                teaser: "",
+                url: buildPageUrl(node)
+            };
+            var instId = nodeInstallationId(node);
+            // Only fetch page bodies for page-like nodes — other content
+            // (news, forms, links, …) just renders from the menu node.
+            if (!instId || !looksLikePage(node)) return Promise.resolve(nodeTile);
+            return getPage(instId).then(function (page) {
                 return {
                     title: getNodeTitle(node, locale) || getPageTitle(page, locale) || "Untitled",
                     teaser: teaserForPage(page, locale),
@@ -364,12 +398,8 @@ function fetchSubPages(menuId, locale) {
                 };
             }).catch(function (err) {
                 // Page body failed — still show a tile from the menu node alone.
-                console.error("[menu-subpages-widget] failed to load page " + node.installationID, err);
-                return {
-                    title: getNodeTitle(node, locale) || "Untitled",
-                    teaser: "",
-                    url: buildPageUrl(node)
-                };
+                console.error("[menu-subpages-widget] failed to load page " + instId, err);
+                return nodeTile;
             });
         }));
     }).then(function (pages) {
@@ -430,6 +460,14 @@ function renderError() {
 function render(pages) {
     document.getElementById("grid").innerHTML = pages.map(tileHTML).join("");
 }
+function renderDebug(children) {
+    var json = JSON.stringify(children, null, 2);
+    document.getElementById("grid").innerHTML =
+        '<pre style="grid-column:1/-1;white-space:pre-wrap;word-break:break-word;' +
+        'font-size:11px;line-height:1.45;background:var(--bg-gray);color:var(--text);' +
+        'padding:14px;border-radius:10px;border:1px solid var(--border);overflow:auto;max-height:75vh;">' +
+        escapeHTML(json) + "</pre>";
+}
 
 /* =====================================================================
    INIT
@@ -437,6 +475,16 @@ function render(pages) {
 function load() {
     if (!MENU_ID) { renderMissingMenuId(); return; }
     renderLoading();
+    if (DEBUG) {
+        getMenuChildren(MENU_ID).then(function (children) {
+            console.log("[menu-subpages-widget] raw children:", children);
+            renderDebug(children || []);
+        }).catch(function (err) {
+            console.error("[menu-subpages-widget]", err);
+            renderError();
+        });
+        return;
+    }
     fetchSubPages(MENU_ID, LOCALE).then(function (pages) {
         if (!pages.length) renderEmpty(); else render(pages);
     }).catch(function (err) {
