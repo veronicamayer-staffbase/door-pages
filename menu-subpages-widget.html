@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<!-- Staffbase brand color via ?brand= URL param -->
+<script>(function(){try{var b=new URLSearchParams(location.search).get('brand');if(b&&/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(b)){document.documentElement.style.setProperty('--sb-brand',b);}}catch(e){}})();</script>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Menu Sub-Pages</title>
+<style>
+:root {
+    --primary: var(--sb-brand, #2563eb);
+    --text: #1f2937;
+    --text-light: #6b7280;
+    --bg: #ffffff;
+    --bg-gray: #f9fafb;
+    --border: #e5e7eb;
+    --radius-card: 14px;
+    --shadow-card: 0 1px 2px rgba(15,23,42,.05), 0 1px 3px rgba(15,23,42,.06);
+}
+@media (prefers-color-scheme: dark) {
+    :root {
+        --primary: var(--sb-brand, #3b9eff);
+        --text: #f3f4f6;
+        --text-light: #9ca3af;
+        --bg: #1f2937;
+        --bg-gray: #111827;
+        --border: #374151;
+    }
+}
+* { box-sizing: border-box; }
+html, body { background: transparent; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: var(--text);
+    margin: 0;
+    padding: 0;
+    -webkit-font-smoothing: antialiased;
+}
+.cw-widget { width: 100%; padding: 16px; }
+
+/* Tile grid — responsive reordering via column count collapse */
+.cw-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+@media (max-width: 480px) { .cw-grid { grid-template-columns: 1fr; } }
+
+.cw-tile {
+    display: flex; flex-direction: column; gap: 8px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-card);
+    padding: 18px; box-shadow: var(--shadow-card);
+    text-decoration: none; color: inherit;
+}
+.cw-tile:hover { box-shadow: 0 2px 8px rgba(15,23,42,.10), 0 1px 3px rgba(15,23,42,.08); }
+.cw-tile:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+.cw-tile-title {
+    margin: 0; font-size: 1.05rem; font-weight: 700; line-height: 1.35; color: var(--text);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.cw-tile-teaser {
+    margin: 0; font-size: 0.88rem; line-height: 1.5; color: var(--text-light); flex: 1;
+    display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
+}
+.cw-tile-cta {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 0.86rem; font-weight: 700; color: var(--primary); margin-top: 2px;
+}
+.cw-tile-cta svg { width: 13px; height: 13px; transition: transform .15s; }
+.cw-tile:hover .cw-tile-cta svg { transform: translateX(2px); }
+
+/* Loading skeleton */
+.cw-skel { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-card); padding: 18px; }
+.cw-skel-line { height: 12px; border-radius: 6px; background: var(--bg-gray); margin-bottom: 8px; animation: cw-pulse 1.4s ease-in-out infinite; }
+.cw-skel-line.cw-w60 { width: 60%; }
+.cw-skel-line.cw-w90 { width: 90%; }
+.cw-skel-line.cw-w40 { width: 40%; }
+@keyframes cw-pulse { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+
+.cw-empty, .cw-error {
+    text-align: center; padding: 40px 16px; color: var(--text-light);
+    border: 1px dashed var(--border); border-radius: var(--radius-card); grid-column: 1 / -1;
+}
+.cw-error p:first-child { font-weight: 700; color: var(--text); margin: 0 0 6px; }
+.cw-error p:last-child { margin: 0 0 14px; font-size: 0.9rem; }
+.cw-retry {
+    background: var(--primary); color: #fff; border: none; border-radius: 999px;
+    padding: 9px 18px; font-weight: 700; font-size: 0.85rem; font-family: inherit; cursor: pointer;
+}
+.cw-retry:hover { filter: brightness(0.94); }
+</style>
+</head>
+<body>
+
+<div class="cw-widget" role="region" aria-label="Menu sub-pages">
+    <div class="cw-grid" id="grid"></div>
+</div>
+
+<script>
+"use strict";
+(function () {
+
+/* =====================================================================
+   CONFIG
+   ===================================================================== */
+var CONFIG = {
+    // Fallback menu id if none is passed via ?menuId= on the embed URL.
+    DEFAULT_MENU_ID: "",
+    DEFAULT_LOCALE: "en_US",
+    TEASER_MAX_CHARS: 160,
+
+    // "_top" navigates the whole Staffbase app frame — recommended since
+    // this widget is embedded inside a Staffbase page via iframe.
+    LINK_TARGET: "_top"
+};
+
+function qp(name) { return new URLSearchParams(location.search).get(name); }
+var MENU_ID = qp("menuId") || CONFIG.DEFAULT_MENU_ID;
+var LOCALE = qp("locale") || CONFIG.DEFAULT_LOCALE;
+
+/* =====================================================================
+   STAFFBASE BRAND COLOR PASSTHROUGH
+   ===================================================================== */
+function applySBBrand() {
+    var sb = getComputedStyle(document.documentElement).getPropertyValue("--sb-brand").trim();
+    if (sb) { document.documentElement.style.setProperty("--primary", sb); return; }
+    try {
+        sb = window.parent.getComputedStyle(window.parent.document.documentElement).getPropertyValue("--sb-brand").trim();
+        if (sb) document.documentElement.style.setProperty("--primary", sb);
+    } catch (e) { /* not same-origin in this context, ignore */ }
+}
+
+/* =====================================================================
+   HELPERS
+   ===================================================================== */
+function escapeHTML(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+        return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+}
+function truncate(str, max) {
+    if (!str) return "";
+    var s = String(str).trim();
+    if (s.length <= max) return s;
+    return s.slice(0, max).replace(/\s+\S*$/, "") + "…";
+}
+
+var ICON_ARROW = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>';
+
+/* =====================================================================
+   STAFFBASE API CALLS — direct, same-origin (Dean's universal embed
+   widget serves this iframe from the Staffbase domain itself, so the
+   logged-in user's session cookie is sent automatically).
+   ===================================================================== */
+function sbFetch(path, params) {
+    var url = new URL(path, location.origin);
+    Object.keys(params || {}).forEach(function (k) {
+        if (params[k] !== undefined && params[k] !== null) url.searchParams.set(k, params[k]);
+    });
+    return fetch(url, { credentials: "include", headers: { Accept: "application/json" } }).then(function (res) {
+        if (!res.ok) throw new Error("Request failed (" + res.status + ") for " + path);
+        return res.json();
+    });
+}
+
+// ASSUMPTION: the "show menu children of a specific item" endpoint
+// (documented as `GET api/menu/children`) takes the parent id as a query
+// param named `id`. Confirm the actual param name in the live spec — it
+// could also be a path segment (`GET api/menu/{id}/children`).
+function getMenuChildren(menuId) {
+    return sbFetch("/api/menu/children", { id: menuId }).then(function (data) {
+        return Array.isArray(data) ? data : data.data || data.children || [];
+    });
+}
+
+// ASSUMPTION: menu nodes that represent a page carry a `pageID` or
+// `installationID` field and a `nodeType` of "page" or "installation".
+// Folder nodes (nodeType "folder") and external links have neither and are
+// filtered out. Confirm the exact nodeType values and id field name.
+function resolvePageId(node) {
+    if (node.nodeType && node.nodeType !== "page" && node.nodeType !== "installation") return null;
+    return node.pageID || node.installationID || node.contentId || null;
+}
+
+// ASSUMPTION: mirrors the public Pages API shape (`GET /api/pages/{id}`).
+// Confirm the exact path against admin-pages-api.
+function getPage(pageId) {
+    return sbFetch("/api/pages/" + encodeURIComponent(pageId));
+}
+
+// ASSUMPTION: modern (Content Designer) pages expose their block document
+// under `contentDocuments.<locale>` (plural — one per locale), while
+// `contents.<locale>` stays HTML-only for classic pages. Confirm both
+// field names against admin-pages-api.
+function getContentDocument(page, locale) {
+    return page.contentDocuments && page.contentDocuments[locale];
+}
+function getPageTitle(page, locale, fallbackNode) {
+    var fromPage = page.contents && page.contents[locale] && page.contents[locale].title;
+    if (fromPage) return fromPage;
+    var loc = fallbackNode && fallbackNode.config && fallbackNode.config.localization && fallbackNode.config.localization[locale];
+    return (loc && loc.title) || "Untitled";
+}
+
+// ASSUMPTION: page URLs follow `/content/pages/{id}` on the current origin.
+// Confirm the actual routing pattern used by Studio/the frontend app.
+function buildPageUrl(page) {
+    return location.origin + "/content/pages/" + page.id;
+}
+
+/* =====================================================================
+   CONTENT DOCUMENT PARSING
+   Per the Staffbase Content Document Format:
+     { blocks: { <id>: { type, config, children? } }, content: [<rootId>, ...] }
+   Text lives on `type: "text"` blocks as config.value; wrapper blocks
+   (paragraph, list item, ...) reference child block ids via `children`.
+   ===================================================================== */
+function collectText(doc, blockId) {
+    var block = doc.blocks && doc.blocks[blockId];
+    if (!block) return "";
+    if (block.type === "text") return (block.config && block.config.value) || "";
+    if (Array.isArray(block.children)) {
+        return block.children.map(function (id) { return collectText(doc, id); }).join("");
+    }
+    return "";
+}
+
+// First non-empty text container at the root level, skipping heading
+// blocks — the page title lives on the page resource, but authors
+// sometimes add a heading block too, so skip it and get real body copy.
+function extractTeaser(doc) {
+    if (!doc || !Array.isArray(doc.content)) return "";
+    for (var i = 0; i < doc.content.length; i++) {
+        var rootId = doc.content[i];
+        var block = doc.blocks && doc.blocks[rootId];
+        if (!block || block.type === "heading") continue;
+        var text = collectText(doc, rootId).trim();
+        if (text) return text;
+    }
+    return "";
+}
+
+/* =====================================================================
+   IN-MEMORY CACHE (60s) — avoids refetching on re-render within a session
+   ===================================================================== */
+var cache = {};
+var CACHE_TTL_MS = 60000;
+function getCached(key) {
+    var entry = cache[key];
+    if (!entry || Date.now() - entry.time > CACHE_TTL_MS) return null;
+    return entry.value;
+}
+function setCached(key, value) { cache[key] = { value: value, time: Date.now() }; }
+
+function fetchSubPages(menuId, locale) {
+    var cacheKey = menuId + ":" + locale;
+    var cached = getCached(cacheKey);
+    if (cached) return Promise.resolve(cached);
+
+    return getMenuChildren(menuId).then(function (children) {
+        var pageNodes = children.filter(function (node) { return resolvePageId(node); });
+        return Promise.all(pageNodes.map(function (node) {
+            var pageId = resolvePageId(node);
+            return getPage(pageId).then(function (page) {
+                var doc = getContentDocument(page, locale);
+                return {
+                    id: pageId,
+                    title: getPageTitle(page, locale, node),
+                    teaser: extractTeaser(doc),
+                    url: buildPageUrl(page)
+                };
+            }).catch(function (err) {
+                console.error("[menu-subpages-widget] failed to load page " + pageId, err);
+                return null;
+            });
+        }));
+    }).then(function (pages) {
+        var result = pages.filter(Boolean);
+        setCached(cacheKey, result);
+        return result;
+    });
+}
+
+/* =====================================================================
+   RENDER
+   ===================================================================== */
+function tileHTML(page) {
+    var teaser = truncate(page.teaser, CONFIG.TEASER_MAX_CHARS);
+    return (
+        '<a class="cw-tile" href="' + escapeHTML(page.url || "#") + '" target="' + CONFIG.LINK_TARGET + '" rel="noopener">' +
+            '<h3 class="cw-tile-title">' + escapeHTML(page.title) + "</h3>" +
+            (teaser ? '<p class="cw-tile-teaser">' + escapeHTML(teaser) + "</p>" : "") +
+            '<span class="cw-tile-cta">Read more ' + ICON_ARROW + "</span>" +
+        "</a>"
+    );
+}
+
+function renderLoading() {
+    var grid = document.getElementById("grid");
+    var skeleton = "";
+    for (var i = 0; i < 4; i++) {
+        skeleton +=
+            '<div class="cw-skel">' +
+                '<div class="cw-skel-line cw-w60"></div>' +
+                '<div class="cw-skel-line cw-w90"></div>' +
+                '<div class="cw-skel-line cw-w90"></div>' +
+                '<div class="cw-skel-line cw-w40"></div>' +
+            "</div>";
+    }
+    grid.innerHTML = skeleton;
+}
+function renderEmpty() {
+    document.getElementById("grid").innerHTML = '<div class="cw-empty"><p>No pages found in this menu.</p></div>';
+}
+function renderError() {
+    document.getElementById("grid").innerHTML =
+        '<div class="cw-error">' +
+            "<p>Couldn't load these pages.</p>" +
+            "<p>Please try again in a moment.</p>" +
+            '<button type="button" class="cw-retry" id="retryBtn">Retry</button>' +
+        "</div>";
+    var btn = document.getElementById("retryBtn");
+    if (btn) btn.addEventListener("click", load);
+}
+function render(pages) {
+    document.getElementById("grid").innerHTML = pages.map(tileHTML).join("");
+}
+
+/* =====================================================================
+   INIT
+   ===================================================================== */
+function load() {
+    if (!MENU_ID) { renderError(); return; }
+    renderLoading();
+    fetchSubPages(MENU_ID, LOCALE).then(function (pages) {
+        if (!pages.length) renderEmpty(); else render(pages);
+    }).catch(function (err) {
+        console.error("[menu-subpages-widget]", err);
+        renderError();
+    });
+}
+
+function init() {
+    applySBBrand();
+    load();
+}
+
+document.addEventListener("DOMContentLoaded", init);
+
+})();
+</script>
+
+</body>
+</html>
