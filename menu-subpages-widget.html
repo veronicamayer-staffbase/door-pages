@@ -99,9 +99,20 @@ body {
 
 /* =====================================================================
    CONFIG
+
+   Deploy target : https://bshrfp.staffbase.rocks/
+   Menu API      : https://backstage.staffbase.com/catalog/default/api/menu-api
+   Pages API     : api:default/pages-api
+
+   The widget reads the children of a menu node and renders each child
+   *page* as a tile (title + teaser + link). Pass the parent menu node id
+   on the embed URL as ?menuId=... — grab it from Experience Studio, or
+   from GET /api/menu (each node has an `id`).
    ===================================================================== */
 var CONFIG = {
-    // Fallback menu id if none is passed via ?menuId= on the embed URL.
+    // Fallback parent menu node id if none is passed via ?menuId= on the
+    // embed URL. Replace with the real id for bshrfp once you have it, or
+    // always pass ?menuId= on the embed URL and leave this empty.
     DEFAULT_MENU_ID: "6a6e18529ff85a0bcba6ee6f",
     DEFAULT_LOCALE: "en_US",
     TEASER_MAX_CHARS: 160,
@@ -141,13 +152,29 @@ function truncate(str, max) {
     if (s.length <= max) return s;
     return s.slice(0, max).replace(/\s+\S*$/, "") + "…";
 }
+// Pick the requested locale from a locale-keyed map, falling back to the
+// first available locale. Used for menu-node localization, page contents,
+// and content documents — all of which are keyed by locale (e.g. "en_US").
+function pickLocale(map, locale) {
+    if (!map || typeof map !== "object") return null;
+    if (locale && map[locale]) return map[locale];
+    var keys = Object.keys(map);
+    return keys.length ? map[keys[0]] : null;
+}
+// Strip HTML down to plain text (classic pages store body HTML in `contents`).
+function htmlToText(html) {
+    if (!html) return "";
+    var tmp = document.createElement("div");
+    tmp.innerHTML = html;
+    return (tmp.textContent || tmp.innerText || "").replace(/\s+/g, " ").trim();
+}
 
 var ICON_ARROW = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>';
 
 /* =====================================================================
-   STAFFBASE API CALLS — direct, same-origin (Dean's universal embed
-   widget serves this iframe from the Staffbase domain itself, so the
-   logged-in user's session cookie is sent automatically).
+   STAFFBASE API CALLS — direct, same-origin. The universal embed widget
+   serves this iframe from the Staffbase domain itself, so the logged-in
+   user's session cookie is sent automatically.
    ===================================================================== */
 function sbFetch(path, params) {
     var url = new URL(path, location.origin);
@@ -160,49 +187,89 @@ function sbFetch(path, params) {
     });
 }
 
-// ASSUMPTION: the "show menu children of a specific item" endpoint
-// (documented as `GET api/menu/children`) takes the parent id as a query
-// param named `id`. Confirm the actual param name in the live spec — it
-// could also be a path segment (`GET api/menu/{id}/children`).
+/* ---------------------------------------------------------------------
+   MENU — per the Menu API, a menu node is a tree where each node carries
+   its children under `children.data`. GET /api/menu/accessible/{id}
+   returns a specific node (permission-filtered for the current user)
+   including its subtree; GET /api/menu returns the whole accessible tree.
+   We read children from `node.children.data`.
+   --------------------------------------------------------------------- */
+function extractChildren(node) {
+    return (node && node.children && Array.isArray(node.children.data)) ? node.children.data : null;
+}
+
 function getMenuChildren(menuId) {
-    return sbFetch("/api/menu/children", { id: menuId }).then(function (data) {
-        return Array.isArray(data) ? data : data.data || data.children || [];
+    // Primary: fetch just the target node (accessible = filtered to what
+    // the current user may see).
+    return sbFetch("/api/menu/accessible/" + encodeURIComponent(menuId))
+        .then(function (node) {
+            var kids = extractChildren(node);
+            return kids || findChildrenInTree(menuId);
+        })
+        .catch(function () {
+            // Fallback: walk the full accessible tree and locate the node.
+            return findChildrenInTree(menuId);
+        });
+}
+
+function findChildrenInTree(menuId) {
+    return sbFetch("/api/menu").then(function (tree) {
+        var found = null;
+        (function walk(node) {
+            if (!node || found) return;
+            if (node.id === menuId) { found = node; return; }
+            var kids = extractChildren(node) || [];
+            for (var i = 0; i < kids.length; i++) walk(kids[i]);
+        })(tree);
+        return extractChildren(found) || [];
     });
 }
 
-// ASSUMPTION: menu nodes that represent a page carry a `pageID` or
-// `installationID` field and a `nodeType` of "page" or "installation".
-// Folder nodes (nodeType "folder") and external links have neither and are
-// filtered out. Confirm the exact nodeType values and id field name.
-function resolvePageId(node) {
-    if (node.nodeType && node.nodeType !== "page" && node.nodeType !== "installation") return null;
-    return node.pageID || node.installationID || node.contentId || null;
+// A page tile is backed by an *installation reference* node with
+// pluginID "page". Folders (nodeType "folder") and other content types
+// are skipped. The Pages API id is the node's `installationID`.
+function isPageNode(node) {
+    return node && node.nodeType !== "folder" && node.pluginID === "page" && !!node.installationID;
 }
 
-// ASSUMPTION: mirrors the public Pages API shape (`GET /api/pages/{id}`).
-// Confirm the exact path against admin-pages-api.
-function getPage(pageId) {
-    return sbFetch("/api/pages/" + encodeURIComponent(pageId));
+// Title from the menu node localization (always present, no extra fetch).
+function getNodeTitle(node, locale) {
+    var loc = node && node.config && node.config.localization;
+    var picked = pickLocale(loc, locale);
+    return (picked && picked.title) || null;
 }
 
-// ASSUMPTION: modern (Content Designer) pages expose their block document
-// under `contentDocuments.<locale>` (plural — one per locale), while
-// `contents.<locale>` stays HTML-only for classic pages. Confirm both
-// field names against admin-pages-api.
+// In-app URL: Staffbase pre-builds `target.url` on the node with the
+// correct id and routing; strip the `/openlink` deep-link prefix for
+// in-app navigation. Fallback mirrors the frontend routing pattern using
+// the *menu node id*.
+function buildPageUrl(node) {
+    if (node.target && node.target.url) {
+        return location.origin + String(node.target.url).replace(/^\/openlink/, "");
+    }
+    if (node.pluginID) return location.origin + "/content/" + node.pluginID + "/" + node.id;
+    return location.origin + "/content/menu/" + node.id;
+}
+
+/* ---------------------------------------------------------------------
+   PAGES — GET /api/pages/{installationID}. Modern (Content Designer)
+   pages expose their block document under contentDocuments.{locale};
+   classic pages keep body HTML under contents.{locale}.content. Title
+   also lives on contents.{locale}.title.
+   --------------------------------------------------------------------- */
+function getPage(installationId) {
+    return sbFetch("/api/pages/" + encodeURIComponent(installationId));
+}
 function getContentDocument(page, locale) {
-    return page.contentDocuments && page.contentDocuments[locale];
+    return pickLocale(page && page.contentDocuments, locale);
 }
-function getPageTitle(page, locale, fallbackNode) {
-    var fromPage = page.contents && page.contents[locale] && page.contents[locale].title;
-    if (fromPage) return fromPage;
-    var loc = fallbackNode && fallbackNode.config && fallbackNode.config.localization && fallbackNode.config.localization[locale];
-    return (loc && loc.title) || "Untitled";
+function getPageTitle(page, locale) {
+    var c = pickLocale(page && page.contents, locale);
+    return (c && c.title) || null;
 }
-
-// ASSUMPTION: page URLs follow `/content/pages/{id}` on the current origin.
-// Confirm the actual routing pattern used by Studio/the frontend app.
-function buildPageUrl(page) {
-    return location.origin + "/content/pages/" + page.id;
+function getClassicHTML(page, locale) {
+    var c = pickLocale(page && page.contents, locale);
+    return (c && c.content) || "";
 }
 
 /* =====================================================================
@@ -237,6 +304,16 @@ function extractTeaser(doc) {
     return "";
 }
 
+// Teaser for either page flavour: modern content document, else classic HTML.
+function teaserForPage(page, locale) {
+    var doc = getContentDocument(page, locale);
+    if (doc) {
+        var fromDoc = extractTeaser(doc);
+        if (fromDoc) return fromDoc;
+    }
+    return htmlToText(getClassicHTML(page, locale));
+}
+
 /* =====================================================================
    IN-MEMORY CACHE (60s) — avoids refetching on re-render within a session
    ===================================================================== */
@@ -255,20 +332,22 @@ function fetchSubPages(menuId, locale) {
     if (cached) return Promise.resolve(cached);
 
     return getMenuChildren(menuId).then(function (children) {
-        var pageNodes = children.filter(function (node) { return resolvePageId(node); });
+        var pageNodes = (children || []).filter(isPageNode);
         return Promise.all(pageNodes.map(function (node) {
-            var pageId = resolvePageId(node);
-            return getPage(pageId).then(function (page) {
-                var doc = getContentDocument(page, locale);
+            return getPage(node.installationID).then(function (page) {
                 return {
-                    id: pageId,
-                    title: getPageTitle(page, locale, node),
-                    teaser: extractTeaser(doc),
-                    url: buildPageUrl(page)
+                    title: getNodeTitle(node, locale) || getPageTitle(page, locale) || "Untitled",
+                    teaser: teaserForPage(page, locale),
+                    url: buildPageUrl(node)
                 };
             }).catch(function (err) {
-                console.error("[menu-subpages-widget] failed to load page " + pageId, err);
-                return null;
+                // Page body failed — still show a tile from the menu node alone.
+                console.error("[menu-subpages-widget] failed to load page " + node.installationID, err);
+                return {
+                    title: getNodeTitle(node, locale) || "Untitled",
+                    teaser: "",
+                    url: buildPageUrl(node)
+                };
             });
         }));
     }).then(function (pages) {
@@ -309,6 +388,13 @@ function renderLoading() {
 function renderEmpty() {
     document.getElementById("grid").innerHTML = '<div class="cw-empty"><p>No pages found in this menu.</p></div>';
 }
+function renderMissingMenuId() {
+    document.getElementById("grid").innerHTML =
+        '<div class="cw-error">' +
+            "<p>No menu selected.</p>" +
+            "<p>Add <code>?menuId=&lt;parent menu node id&gt;</code> to the widget URL.</p>" +
+        "</div>";
+}
 function renderError() {
     document.getElementById("grid").innerHTML =
         '<div class="cw-error">' +
@@ -327,7 +413,7 @@ function render(pages) {
    INIT
    ===================================================================== */
 function load() {
-    if (!MENU_ID) { renderError(); return; }
+    if (!MENU_ID) { renderMissingMenuId(); return; }
     renderLoading();
     fetchSubPages(MENU_ID, LOCALE).then(function (pages) {
         if (!pages.length) renderEmpty(); else render(pages);
@@ -345,6 +431,7 @@ function init() {
 document.addEventListener("DOMContentLoaded", init);
 
 })();
+
 </script>
 
 </body>
